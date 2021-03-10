@@ -25,9 +25,6 @@ plot(ILMN$ILMN.Close)
 fit_ILMN <- auto.arima(ILMN$ILMN.Close)
 fit_TSLA <- auto.arima(TSLA$TSLA.Close)
 
-TSLA['2015-03/2015-07']
-TSLA2 <- TSLA['2015-03/2015-07']
-
 # divide time-series data into 4-month increments
 make_date_bounds <- function(dates){ #helper function
   upper_d = dates$upper
