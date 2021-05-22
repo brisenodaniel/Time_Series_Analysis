@@ -57,3 +57,5 @@ Box.test(mod2$residuals, type='Ljung-Box')
 # of 0.05.
 
 
+x = acf(na.omit(diff(diff(ts))))
+x

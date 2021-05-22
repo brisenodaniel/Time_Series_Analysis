@@ -34,6 +34,7 @@ ts = AAPL$AAPL.Close
 #b
 library(aTSA)
 adf.test(ts)
+
 #c
 auto.arima(ts)
 fit = auto.arima(ts)

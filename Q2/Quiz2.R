@@ -52,7 +52,7 @@ acf(na.omit(diff(diff(diff(ts)))))
 #however, after taking one difference, data appears nearly stationary, and might
 #be suitably approximated by a ARIMA(p,1,q) model
 
-#d
+#c
 eacf(na.omit(diff(ts)))
 #extended autocorrelation function suggests ARIMA(0,1,1)
 auto.arima(ts)

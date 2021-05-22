@@ -1,0 +1,383 @@
+---
+title: "Final"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(forecast)
+library(tidyquant)
+library(aTSA)
+library(TSA)
+library(quantmod)
+library(tidyverse)
+library(epiDisplay)
+library(forecast)
+```
+
+## Problem 1 ##
+### Part A ###
+First we import the stocks
+```{r}
+symb = c('FB','AAPL','INTC','IBM','NVDA','SIRI','MRNA','GOOG','AMZN','WFC','GE','EBAY','TMUS','VZ','DIS','NKE','NFLX','WMT','TSLA','TGT')
+stocks = getSymbols(symb, from='2016-05-20', to='2021-05-20')
+```
+Next we slice the closing prices into sliding windows.
+```{r}
+#create sliding window list
+sw  <-  list()
+#populate dataframe with sliding window data
+#columns are window number, rows are stock name
+for (stock_lbl in stocks){
+  #get closing stock price for every symbol obtained
+  stock <- get(stock_lbl)[,sprintf("%s.Close", stock_lbl)]
+  #slice the stocks by window size 100
+  upper_idx <- length(stock)#array will be sliced at intervals (upper_idx-100:upper_idx)
+  windows <- list() #initialize list to hold window slices
+  #control variable to implement do-while logic
+  keep_cutting <- TRUE
+  window_num <- 1
+  while(keep_cutting){
+    lower_idx <- max(1,upper_idx-100)
+    windows[[window_num]] <- stock[lower_idx:upper_idx]
+    upper_idx <- upper_idx - 101
+    if (lower_idx==1)
+      keep_cutting <- FALSE
+    window_num <- window_num + 1
+  }
+  sw[[stock_lbl]] <- windows
+}
+```
+
+Next we fit an ARIMA model to each slice
+```{r}
+fit_arimas_to_windows <- function(windows){
+  arima_mods <- list()
+  for (idx in 1:length(windows)){
+    time_series = ts(windows[idx][[1]])
+    mod <- auto.arima(time_series)
+    arima_mods[[idx]] <- mod
+  }
+  return(arima_mods)
+}
+arima_mods <- lapply(sw, fit_arimas_to_windows)
+```
+
+Next we construct our frequency table.
+```{r}
+arima_df <- data.frame(ncol=1) 
+for (stock_lbl in stocks){
+  for(idx in 1:length(arima_mods[[stock_lbl]])){
+    arma <-  arima_mods[[stock_lbl]][[idx]]$arma
+    arima_df[nrow(arima_df)+1,] <- toString(arma)
+  }
+}
+arima_df <- data.frame(arima_df[-c(1),])
+colnames(arima_df) <- c('ARIMA')
+# convert ARIMA model column into factor 
+arima_df$ARIMA <-  factor(arima_df$ARIMA)
+tab1(arima_df$ARIMA)
+```
+The arima coefficents are in order (p,q,P,Q,S,d,D). Thus, the most common model is $ARIMA(0,1,0)$, or white-noise after a single non-seasonal difference. This is a random walk, which indicates that R is not finding much structure to the time series.
+
+### Part B ###
+First we get the first 500 days of data
+```{r}
+
+d500 <- list()
+for (stock_lbl in stocks){
+   stock <- get(stock_lbl)[,sprintf("%s.Close", stock_lbl)]
+   upper_idx <- length(stock)
+   lower_idx <- upper_idx-500+1
+   d500[[stock_lbl]] <- stock[lower_idx:upper_idx]
+}
+```
+Next, we fit the following models on the data we have just taken
+
+- An ARIMA model found by `auto.arima`
+- A HW model
+
+For each model, we obtain a one-step ahead forecast, a "success" boolean indicating if the forecast and the true value have the same direction, and a box-pierce p-value indicating the probability that the observed residuals are normally distributed about 0.
+
+These values will be stored in a 3-dimensional object: a list of dimension `(stocks, sliding_window)=(20,400)`, which will contain at each index a data-frame with rows `ARIMA, HW` and columns `forecast, success, p-val`.
+
+```{r}
+
+############################## Logic for extracting needed statistics from a single sliding window
+#function to find best non-seasonal HW model
+build_hw_mod <- function(time_series){
+  hw_ff = HoltWinters(time_series, beta=FALSE, gamma=FALSE)
+  hw_tf = HoltWinters(time_series, beta=TRUE, gamma=FALSE)
+  
+  best_hw = NULL
+  best_SSE = 900000000000000000000
+  for (hw in list(hw_ff, hw_tf)){
+    if (hw$SSE < best_SSE){
+      best_SSE = hw$SSE
+      best_hw = hw
+    }
+  }
+  return(best_hw)
+}
+
+#function to tell us if direction of forecast and actual one-ahead value
+#are the same. A successful forecast will have the same direction and will
+#return 1. An unsuccessful forecast will have different direction from true
+#one-ahead value and will return 0
+good_predicton <- function(t0, t1, t1_pred, rounding=FALSE ){
+  true_trend <- t0-t1
+  pred_trend <- t0-t1_pred
+  if (true_trend*pred_trend>0){
+    return(1)
+  }
+  if (t1==t1_pred){
+    return(1)
+  }
+  if(!is.null(rounding)){
+    error <- t1 - t1_pred
+    if (abs(error)<rounding) 
+      return (1)
+  }
+  
+  return(0)
+}
+
+#function to create the specified dataframe on each slice of the sliding window
+make_df_on_window <- function(time_series, rounding=NULL){
+  #extract fitting data, one_ahead value (t1) and most recent value in fitting data (t0)
+  fit_data <- time_series[1:99]
+  one_ahead <- as.numeric(time_series[100])
+  one_back <- as.numeric(time_series[99])
+  #build forecasting models
+  arima_mod <- auto.arima(fit_data)
+  hw <- build_hw_mod(fit_data)
+  hw_forecaster = forecast:::forecast.HoltWinters(hw, h=1)
+  
+  #build ARIMA row
+  resid <- arima_mod$residuals
+  arima_degf <- sum(arima_mod$arma[1:2])
+  arima_p <- Box.test(resid, type='Box-Pierce', fitdf=arima_degf, lag=10)$p.value
+  arima_pred <- forecast::forecast(arima_mod, h=1)$mean[[1]]
+  arima_good_predict <- good_predicton(one_back, one_ahead, arima_pred, rounding)
+  arima_row <- list('Prediction'=arima_pred, 
+                    'True'=one_ahead, 
+                    'OneBack'= one_back, 
+                    'Success'= arima_good_predict,
+                    'p'= arima_p)
+  
+  #build HW row
+  resid <- hw_forecaster$residuals
+  hw_p = Box.test(resid, type='Box-Pierce')$p.value
+  hw_pred = hw_forecaster$mean[[1]]
+  hw_good_predict <- good_predicton(one_back, one_ahead, hw_pred, rounding)
+  hw_row <-  list('Prediction'=hw_pred, 
+                  'True'=one_ahead, 
+                  'OneBack'=one_back, 
+                  'Success'=hw_good_predict, 
+                  'p'=hw_p)
+  
+  #build matrix
+#  print(hw_row)
+#  print(arima_row)
+  window_stats <- rbind('ARIMA'=arima_row, 'HW'=hw_row)
+  return(window_stats)
+}
+
+############# Logic needed for extracting needed statistics from a single stock
+make_dfs_on_stock <- function(time_series, rounding=NULL){
+  window_slices = list()
+  lower_idx = 0
+  #compute sliding windows
+  while((lower_idx+100)<length(time_series)){
+    lower_idx = lower_idx+1
+    upper_idx = lower_idx+100
+    window_slices[[lower_idx]] <- time_series[lower_idx:upper_idx]
+  }
+  #get statistics on each sliding window
+  stock_stats <- lapply(window_slices, make_df_on_window, rounding)
+  return( stock_stats )
+}
+model_stats <- lapply(d500, make_dfs_on_stock)
+```
+
+Now that the relevant statistics have been taken on the sliding windows, we can begin collecting the global statistics asked for in the question prompt.
+
+First we investigate: "Report the percent of times good and poor fit was acheived for each method"
+
+```{r}
+get_percent_good_fit <- function(method){
+  method_good_fit <- 0
+  method_all_fits <- 0
+  for (stock_stats in model_stats){
+    for(window_stats in stock_stats){
+      window_p <- window_stats[method,'p'][[1]]
+      if (window_p > 0.05){
+        method_good_fit <- method_good_fit +1
+      }
+      method_all_fits <- method_all_fits +1
+    }
+  }
+  method_percent_good_fit <- method_good_fit/method_all_fits
+  return(method_percent_good_fit)
+}
+arima_good_fit_percent <- get_percent_good_fit('ARIMA')
+arima_bad_fit_percent <- 1-arima_good_fit_percent
+hw_good_fit_percent <-  get_percent_good_fit('HW')
+hw_bad_fit_percent <- 1-hw_good_fit_percent
+
+#assemble dataframe to present results
+arima_row <- c(arima_good_fit_percent*100, arima_bad_fit_percent*100)
+hw_row <- c(hw_good_fit_percent*100, hw_bad_fit_percent*100)
+fit_df <- rbind('ARIMA'=arima_row, 'HW'=hw_row)
+fit_df <- data.frame(fit_df)
+colnames(fit_df) <- c('Percent Good Fit','Percent Bad Fit')
+fit_df
+```
+
+Next we investigate: "Summarize the results in a table by reporting the percent of time ARIMA and HW forecasted each stock one step ahead direction over the last 400 trading days within the two groups of good and poor fit"
+
+```{r}
+### function to get statistics on a single model type
+get_percent_good_forecast <- function(method, p=0.05){
+  good_fit_good_forecast <- 0
+  bad_fit_good_forecast <- 0
+  good_fit_total_forecasts <- 0
+  bad_fit_total_forecasts <- 0
+  
+  for (stock_stats in model_stats){
+    for(window_stats in stock_stats){
+      forecast_goodness <- window_stats[method,'Success'][[1]]
+      fit_p <- window_stats[method,'p'][[1]]
+      fit_good <-  FALSE
+      if (fit_p > p){
+        fit_good <-  TRUE
+      }
+      if (fit_good){
+        good_fit_good_forecast = good_fit_good_forecast + forecast_goodness
+        good_fit_total_forecasts = good_fit_total_forecasts + 1
+      }
+      else {
+        bad_fit_good_forecast = bad_fit_good_forecast + forecast_goodness
+        bad_fit_total_forecasts = bad_fit_total_forecasts + 1
+      }
+    }
+  }
+  print(good_fit_total_forecasts)
+  good_fit_good_forcast_percent <-  good_fit_good_forecast/good_fit_total_forecasts
+  bad_fit_good_forecast_percent <- bad_fit_good_forecast/bad_fit_total_forecasts
+  return( list('good_fit'=good_fit_good_forcast_percent, 'bad_fit'=bad_fit_good_forecast_percent))
+}
+
+# get statsitics
+ARIMA_good <- get_percent_good_forecast('ARIMA')
+HW_good <- get_percent_good_forecast('HW')
+#assemble table and report
+ARIMA_good_fit_performance <- c(100*ARIMA_good[['good_fit']], 
+                              100*(1-ARIMA_good[['good_fit']]))
+ARIMA_bad_fit_performance <- c(100*ARIMA_good[['bad_fit']],
+                               100*(1-ARIMA_good[['bad_fit']]))
+HW_good_fit_performance <- c(100*HW_good[['good_fit']],
+                             100*(1-HW_good[['good_fit']]))
+HW_bad_fit_performance <- c(100*HW_good[['bad_fit']],
+                            100*(1-HW_good[['bad_fit']]))
+report_table <-  rbind('ARIMA Good Fit' = ARIMA_good_fit_performance,
+                       'ARIMA Bad Fit' = ARIMA_bad_fit_performance,
+                       'HW Good Fit' = HW_good_fit_performance,
+                       'HW Bad Fit' = HW_bad_fit_performance)
+colnames(report_table) = c('Percent Correct Forecast', 'Percent Incorrect Forecast')
+data.frame(report_table)
+```
+Which yeilds the rather surprising result that we get better performance on the bad fits than the good fits.
+
+Something that might be contributing to this is that we saw before that the proportion of bad fits is very small, thus we might not be getting a true distribution of how a set of badly fitted models would perform, due to small sample size.
+
+However, this does not explain why the performance of the models, in particular the ARIMA model, is so bad, with us usually predicting the wrong one-step-ahead trend.
+
+A possible reason for this might be identified by looking at the predictions `auto.arima` made on the data:
+
+```{r}
+head(model_stats$FB)
+```
+And we see that the predictions are always the last observed value (`OneBack`) in the time-series. Recall that we saw that the most prevalent model was ARIMA(0,1,0), or a random walk. The best prediction for a random walk is the last observed value. Thus, we do not have enough structure to this data to forecast well using ARIMA, but the poor prediction results and the better predictions resulting from HoltWinters suggest that some structure is present in the data which `auto.arima` is not capturing.
+
+A possible way to improve this performance might be to increase the window size from 100. A window size of 100 does not allow possible seasonality over the course of a year to be observed, yet there is good evidence to believe that stock data is seasonal.
+
+
+## Problem 5 ##
+### Part A ###
+
+First we plot the original time series:
+```{r}
+data("AirPassengers")
+ts = AirPassengers
+plot(ts)
+```
+Next the logarithm of the time series:
+```{r}
+log_ts = log(ts)
+plot(log_ts)
+```
+Both plots are clearly non-stationary. However, looking at the range spanned by the y-axis, we see that the explosiveness of the non-stationarity has been reduced. The original time-series has a change in mean on the order of 300 in the original dataset. The post-log dataset has a drift in the mean on the order of 1. Additionally, in the original dataset, the seasonal fluctuations increase dramatically in size with every passing year. The seasonal fluctuation in 1950 is of about 50, while in 1960 it is in about 200. In the log of the data, we see that the seasonal fluctuation in 1950 is similar to the seasonal fluctuation in 1960.
+
+### Part B ###
+```{r}
+diff_log_ts =diff(log_ts)
+plot(diff_log_ts)
+```
+By taking the first difference of the logged time series, we have eliminated the drift in mean and the data now looks much more stationary. However, we can still see a seasonal component which causes the variance of the data to be different at predictable intervals.
+
+### Part C ###
+Since this is monthly data, we take a seasonal difference with lag 12:
+```{r}
+s12diff_log_diff_ts = diff(diff_log_ts, lag=12)
+plot(s12diff_log_diff_ts)
+```
+Now the seasonality in the data has been eliminated and thus might be modeled by a simpler time-series. We do observe some change in the variance, with years 1955-1958 showing less variance in the transformed data. However, without further testing we cannot conclude that this change in variance might not be attributable to random chance, rather than some non-stationarity in the data. So we conclude that the above dataset is near enough to stationarity to continue with out analysis:
+
+### Part D ###
+```{r}
+acf(as.vector(s12diff_log_diff_ts), lag.max=36, ci.type='ma')
+```
+The above plot suggests that we need to incorporate significant autocorrelation at lags 1 and 12, and perhaps at lag 3. Other than that, autocorrelation has been largely eliminated, which will contribute to us specifying a simpler model.
+
+### Part E ###
+
+```{r}
+fit = arima(log_ts, order=c(0,1,1), seasonal=list(order=c(0,1,1), period=12))
+fit
+```
+
+### Part F ###
+
+First we plot a simple denisty plot and histogram of the residuals and check for evidence of large deviations from a $N(0,\sigma^2_e)$ distribution.
+```{r}
+plot(density(fit$residuals))
+```
+```{r}
+hist(fit$residuals)
+```
+
+The data looks approximately normal, so we continue with our analysis. Next we plot the QQ plot for the data
+```{r}
+qqnorm(fit$residuals)
+```
+Again, the points lie approximately along a y=x line, indicating that the quantiles of our residuals are about what would be expected of a normal distribution centered at 0. We finish our analysis of the normality of the residuals with a hypothesis test
+
+```{r}
+Box.test(fit$residuals, fitdf=2, lag=10)
+```
+We see that the Box-Pierce test does not reject the null and we can conclude that our residuals are approximately normal.
+```{r}
+acf(fit$residuals)
+```
+The plot of the ACF also shows evidence of a good model fit, since the residuals do not appear to be correlated with each other, as we would expect for white noise.
+
+#### Part G ####
+```{r}
+plot(fit, n.ahead=24)
+
+```
+Here, we can see that our predictions get more uncertain as time goes on, since our forecast limits get wider. 
+
